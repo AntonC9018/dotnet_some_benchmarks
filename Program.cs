@@ -4,10 +4,10 @@ using System.Diagnostics;
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Running;
 
-[SimpleJob(5, 5, 15, 15)]
+[SimpleJob(10, 5, 50, 15)]
 public class Program
 {
-    [Params(1, 100, 100000)]
+    [Params(1, 100, 10000)]
     public int count;
     
     [Benchmark]
@@ -145,6 +145,53 @@ public class Program
             indexable[arrIndex][i] = 1;
         }
         
+        return indexable;
+    }
+
+    public class DictInherited : Dictionary<int, int>, IIndexable<int>
+    {
+        public DictInherited(int capacity) : base(capacity) {}
+    }
+
+    [Benchmark]
+    public IIndexable<int> iindexable_dict_inherited()
+    {
+        IIndexable<int> indexable = new DictInherited(count);
+        for (int i = 0; i < count; i++) 
+            indexable[i] = 1;
+        return indexable;
+    }
+
+    [Benchmark]
+    public object iindexable_dict_inherited_mixed()
+    {
+        IIndexable<int>[] indexable = { 
+            new DictInherited(count), new ListT(count), 
+            new DictInherited(count), new ListT(count),
+        };
+        for (int i = 0; i < count; i++)
+        for (int arrIndex = 0; arrIndex < indexable.Length; arrIndex++) 
+        {
+            indexable[arrIndex][i] = 1;
+        }
+        return indexable;
+    }
+
+    [Benchmark]
+    public object iindexable_dict_inherited_check_mixed()
+    {
+        IIndexable<int>[] indexable = { 
+            new DictInherited(count), new ListT(count), 
+            new DictInherited(count), new ListT(count),
+        };
+        for (int i = 0; i < count; i++)
+        for (int arrIndex = 0; arrIndex < indexable.Length; arrIndex++) 
+        {
+            if (indexable[arrIndex] is ListT a)
+                a[i] = 1;
+            else if (indexable[arrIndex] is DictInherited d)
+                d[i] = 1;
+        }
         return indexable;
     }
 
