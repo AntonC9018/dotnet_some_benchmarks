@@ -83,6 +83,15 @@ public class Program
     }
 
     [Benchmark]
+    public IIndexable<int> iindexable_dict()
+    {
+        IIndexable<int> indexable = new DictionaryT(count);
+        for (int i = 0; i < count; i++) 
+            indexable[i] = 1;
+        return indexable;
+    }
+
+    [Benchmark]
     public object check_dict()
     {
         object indexable = new Dictionary<int, int>(count);
