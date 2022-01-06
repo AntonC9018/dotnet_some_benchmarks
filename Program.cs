@@ -211,7 +211,7 @@ public class Program
         // var summary = BenchmarkRunner.Run<Foreaches>();
         // var summary = BenchmarkRunner.Run<AsyncVsSyncFiles>();
         // var summary = BenchmarkRunner.Run<EnumerateFilesVsGetFiles1>();
-        var summary = BenchmarkRunner.Run<Files7>();
+        var summary = BenchmarkRunner.Run<Files8>();
     }
 }
 
@@ -812,7 +812,7 @@ public interface IShouldIgnoreDirectory
 [MaxIterationCount(15)]
 [MinWarmupCount(1)]
 [MaxWarmupCount(10)]
-public class Files7
+public class Files8
 {
     const int kb = 1024;
     const int mb = kb * kb;
@@ -821,11 +821,11 @@ public class Files7
     [Params(
         //kb, 
         // 128 * kb
-        1 * kb,
+        // 1 * kb,
         2 * kb,
-        4 * kb,
+        // 4 * kb,
         8 * kb,
-        16 * kb,
+        // 16 * kb,
         64 * kb
     // 16 * kb, 64 * kb
     // , mb
@@ -850,6 +850,10 @@ public class Files7
         // , 50
     )]
     public int numFilesAtOnce;
+
+
+    [Params(1, 2, 4, 8)]
+    public int numParallelHandles;
     
     
     public byte[][] bytes;
@@ -986,7 +990,7 @@ public class Files7
         }
     }
 
-    [Benchmark]
+    // [Benchmark]
     public async Task write_files_almost_sync_without_buffer_copies_safe_handle()
     {
         string dir = MakeTempDir();
@@ -1009,7 +1013,7 @@ public class Files7
         }
     }
 
-    [Benchmark]
+    // [Benchmark]
     public async Task write_files_almost_sync_file_stream()
     {
         string dir = MakeTempDir();
@@ -1030,7 +1034,7 @@ public class Files7
     }
 
     
-    [Benchmark]
+    // [Benchmark]
     public void write_files_sync_file_stream()
     {
         string dir = MakeTempDir();
@@ -1046,7 +1050,7 @@ public class Files7
     }
 
 
-    [Benchmark]
+    // [Benchmark]
     public void write_files_sync_without_buffer_copies_safe_handle()
     {
         string dir = MakeTempDir();
