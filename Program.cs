@@ -4,6 +4,11 @@ using System.Diagnostics;
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Running;
 using System.Linq;
+using System.Text;
+using System.IO;
+using System.Threading.Tasks;
+using BenchmarkDotNet.Order;
+using System.Diagnostics.CodeAnalysis;
 
 [SimpleJob(10, 5, 50, 15)]
 public class Program
@@ -200,7 +205,9 @@ public class Program
     {
         // var summary = BenchmarkRunner.Run<Program>();
         // var summary = BenchmarkRunner.Run<MyListVsList>();
-        var summary = BenchmarkRunner.Run<Foreaches>();
+        // var summary = BenchmarkRunner.Run<Foreaches>();
+        // var summary = BenchmarkRunner.Run<AsyncVsSyncFiles>();
+        var summary = BenchmarkRunner.Run<EnumerateFilesVsGetFiles1>();
     }
 }
 
@@ -500,3 +507,296 @@ public class Foreaches
         return sum;
     }
 }
+
+// [SimpleJob(launchCount: 2, warmupCount: 1, targetCount: 2)]
+[Orderer(SummaryOrderPolicy.Method)]
+[MemoryDiagnoser]
+public class AsyncVsSyncFiles
+{
+    const int kb = 1024;
+    const int mb = kb * kb;
+    [Params(kb, mb)]
+    public long numBytes;
+    [Params(5, 10, 25)]
+    public int numFiles;
+    public byte[] bytes;
+
+    [GlobalSetup]
+    public void GlobalSetup()
+    {
+        bytes = new byte[numBytes]; // executed once per each N value
+        _toClear.Clear();
+    }
+
+    public List<string> _toClear = new List<string>(); 
+
+
+    [GlobalCleanup]
+    public void GlobalCleanup()
+    {
+        foreach (var d in _toClear)
+        {
+            foreach (var f in Directory.EnumerateFiles(d))
+                File.Delete(f);
+            Directory.Delete(d);
+        }
+    }
+
+    public string MakeTempDir()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + "_sync");
+        _toClear.Add(dir);
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    [Benchmark]
+    public void write_bytes_sync()
+    {
+        var dir = MakeTempDir();
+        for (int i = 0; i < numFiles; i++)
+        {
+            var filePath = Path.Combine(dir, i.ToString());
+            File.WriteAllBytes(filePath, bytes);
+            bytes[i] = (byte) i;
+        }
+    }
+
+    [Benchmark]
+    public async Task write_bytes_async()
+    {
+        var dir = MakeTempDir();
+        var tasks = new Task[numFiles];
+        for (int i = 0; i < numFiles; i++)
+        {
+            var filePath = Path.Combine(dir, i.ToString());
+            tasks[i] = File.WriteAllBytesAsync(filePath, bytes);
+            bytes[i] = (byte) (i + 1);
+        }
+        await Task.WhenAll(tasks);
+    }
+}
+
+[HtmlExporter]
+[MemoryDiagnoser]
+[MinIterationCount(5)]
+[MaxIterationCount(15)]
+[MinWarmupCount(1)]
+[MaxWarmupCount(10)]
+public class EnumerateFilesVsGetFiles1
+{
+    string path = @"E:\Coding";
+    // [Benchmark]
+    public string[] enumerate_no_filter()
+    {
+        return Directory.EnumerateFiles(path).ToArray();
+    }
+    
+    // [Benchmark]
+    public string[] get_files_no_filter()
+    {
+        return Directory.GetFiles(path);
+    }
+
+    
+    // [Benchmark]
+    public string[] enumerate_source_files()
+    {
+        return Directory.EnumerateFiles(path, "*.cs", SearchOption.AllDirectories).ToArray();
+    }
+    
+    // [Benchmark]
+    public string[] get_source_files()
+    {
+        return Directory.GetFiles(path, "*.cs", SearchOption.AllDirectories);
+    }
+
+
+    string ignoredFile = Path.GetFullPath("Program.cs");
+    // [Benchmark]
+    public string[] get_files_except_one()
+    {
+        var files = Directory.GetFiles(path);
+        return files.Where(f => f != ignoredFile).ToArray();
+    }
+
+    // [Benchmark]
+    public string[] enumerate_files_except_one()
+    {
+        return Directory.EnumerateFiles(path).Where(f => f != ignoredFile).ToArray();
+    }
+
+
+    // [Benchmark]
+    public string[] get_source_files_except_one()
+    {
+        var files = Directory.GetFiles(path, "*.cs", SearchOption.AllDirectories);
+        return files.Where(f => f != ignoredFile).ToArray();
+    }
+
+    // [Benchmark]
+    public string[] enumerate_source_files_except_one()
+    {
+        return Directory.EnumerateFiles(path, "*.cs", SearchOption.AllDirectories)
+            .Where(f => f != ignoredFile).ToArray();
+    }
+
+    string ignoredDirectoryName = "avr";
+    // [Benchmark]
+    public string[] get_files_that_are_not_in_directory_simplest()
+    {
+        var files = Directory.GetFiles(path, "*.cs", SearchOption.AllDirectories);
+        return files.Where(f => new DirectoryInfo(Path.GetDirectoryName(f)).Name != ignoredDirectoryName).ToArray();
+    }
+    
+    // [Benchmark]
+    public string[] enumerate_files_that_are_not_in_directory_simplest()
+    {
+        var files = Directory.EnumerateFiles(path, "*.cs", SearchOption.AllDirectories);
+        return files.Where(f => new DirectoryInfo(Path.GetDirectoryName(f)).Name != ignoredDirectoryName).ToArray();
+    }
+
+    record Ignorer(string ignoredName) : IShouldIgnoreDirectory
+    {
+        public bool ShouldIgnoreDirectory(string fullFilePath)
+        {
+            return new DirectoryInfo(Path.GetDirectoryName(fullFilePath)).Name == ignoredName;
+        }
+    }
+
+    record Ignorer2(string ignoredName) : IShouldIgnoreDirectory
+    {
+        public bool ShouldIgnoreDirectory(string fullFilePath)
+        {
+            var i = fullFilePath.LastIndexOf(Path.DirectorySeparatorChar);
+            if (i == -1)
+                return false;
+            int length = fullFilePath.Length - (i + 1);
+            var s = fullFilePath.AsSpan(i + 1, length);
+            return s.SequenceCompareTo(ignoredName) == 0;
+        }
+    }
+
+    [Benchmark]
+    public string[] get_files_that_are_not_in_directory_ignorer()
+    {
+        return IShouldIgnoreDirectory.EnumerateFilesIgnoring(path, new Ignorer(ignoredDirectoryName), "*.cs").ToArray();
+    }
+
+    [Benchmark]
+    public string[] get_files_that_are_not_in_directory_ignorer_less_alloc()
+    {
+        return IShouldIgnoreDirectory.EnumerateFilesIgnoring(path, new Ignorer2(ignoredDirectoryName), "*.cs").ToArray();
+    }
+
+    static bool IsIgnored(string path, string ignoredName)
+    {
+        int idx = path.IndexOf(Path.DirectorySeparatorChar);
+        while (idx != -1 && idx < path.Length)
+        {
+            int next = path.IndexOf(Path.DirectorySeparatorChar, idx + 1);
+            if (next == -1)
+                next = path.Length;
+            int length = next - (idx + 1);
+            if (path.AsSpan(idx + 1, length).SequenceCompareTo(ignoredName) == 0)
+                return true;
+            idx = next;
+        }
+        return false;
+    }
+
+    static bool IsIgnoredArray(string path, string[] ignoredNames)
+    {
+        int idx = path.IndexOf(Path.DirectorySeparatorChar);
+        while (idx != -1 && idx < path.Length)
+        {
+            int next = path.IndexOf(Path.DirectorySeparatorChar, idx + 1);
+            if (next == -1)
+                next = path.Length;
+            int length = next - (idx + 1);
+            foreach (var ignoredName in ignoredNames)
+                if (path.AsSpan(idx + 1, length).SequenceCompareTo(ignoredName) == 0)
+                    return true;
+            idx = next;
+        }
+        return false;
+    }
+
+    // [Benchmark]
+    public string[] get_files_that_are_not_in_directory_all_directories_with_this_name()
+    {
+        var files = Directory.GetFiles(path, "*.cs", SearchOption.AllDirectories);
+        return files.Where(f => !IsIgnored(f, ignoredDirectoryName)).ToArray();
+    }
+
+    [Benchmark]
+    public string[] enumerate_files_that_are_not_in_directory_all_directories_with_this_name()
+    {
+        var files = Directory.GetFiles(path, "*.cs", SearchOption.AllDirectories);
+        return files.Where(f => !IsIgnored(f, ignoredDirectoryName)).ToArray();
+    }
+
+
+    string[] ignoredNames = new[] { "avr", "a", "Kari", "Hello", "Stuff", "bin", "obj" };
+
+    record IgnorerArray(string[] ignoredNames) : IShouldIgnoreDirectory
+    {
+        public bool ShouldIgnoreDirectory(string fullFilePath)
+        {
+            var i = fullFilePath.LastIndexOf(Path.DirectorySeparatorChar);
+            if (i == -1)
+                return false;
+            int length = fullFilePath.Length - (i + 1);
+            var s = fullFilePath.AsSpan(i + 1, length);
+            foreach (var f in ignoredNames)
+            {
+                if (s.SequenceCompareTo(f) == 0)
+                    return true;
+            }
+            return false;
+        }
+    }
+
+    [Benchmark]
+    public string[] get_files_that_are_not_in_directory_ignorer_array()
+    {
+        return IShouldIgnoreDirectory.EnumerateFilesIgnoring(path, new IgnorerArray(ignoredNames), "*.cs").ToArray();
+    }
+
+    [Benchmark]
+    public string[] enumerate_files_that_are_not_in_directory_all_directories_with_this_name_array()
+    {
+        var files = Directory.GetFiles(path, "*.cs", SearchOption.AllDirectories);
+        return files.Where(f => !IsIgnoredArray(f, ignoredNames)).ToArray();
+    }
+}
+
+
+public interface IShouldIgnoreDirectory
+{
+    bool ShouldIgnoreDirectory(string fullFilePath);
+
+    public static IEnumerable<string> EnumerateFilesIgnoring(
+        [NotNull] string rootDirectory, 
+        [NotNull] IShouldIgnoreDirectory ignore,
+        [NotNull] string fileSearchPattern = "*")
+    {
+        Debug.Assert(rootDirectory != null, "Check yourself before calling");
+        Debug.Assert(ignore != null, "Check yourself before calling");
+        Debug.Assert(fileSearchPattern != null, "Invalid pattern");
+
+        Stack<string> directories = new Stack<string>();
+        directories.Push(rootDirectory);
+        while (directories.Count > 0)
+        {
+            string current = directories.Pop();
+            if (ignore.ShouldIgnoreDirectory(current))
+                continue;
+            foreach (var subdir in Directory.EnumerateDirectories(current, "*", SearchOption.TopDirectoryOnly))
+                directories.Push(subdir);
+            foreach (var file in Directory.EnumerateFiles(current, fileSearchPattern, SearchOption.TopDirectoryOnly))
+                yield return file;
+        }
+    }
+}
+
