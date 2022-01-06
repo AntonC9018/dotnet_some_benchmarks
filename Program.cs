@@ -12,6 +12,9 @@ using System.Diagnostics.CodeAnalysis;
 using System.Buffers;
 using Microsoft.Win32.SafeHandles;
 using System.Reflection;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using System.Collections.Concurrent;
 
 [SimpleJob(10, 5, 50, 15)]
 public class Program
@@ -211,7 +214,8 @@ public class Program
         // var summary = BenchmarkRunner.Run<Foreaches>();
         // var summary = BenchmarkRunner.Run<AsyncVsSyncFiles>();
         // var summary = BenchmarkRunner.Run<EnumerateFilesVsGetFiles1>();
-        var summary = BenchmarkRunner.Run<Files8>();
+        // var summary = BenchmarkRunner.Run<Files8>();
+        var summary = BenchmarkRunner.Run<SyntaxTrees>();
     }
 }
 
@@ -1099,5 +1103,150 @@ public class Files8
             
             ArrayPool<byte>.Shared.Return(arr);
         }
+    }
+}
+
+
+
+[HtmlExporter]
+[MemoryDiagnoser]
+public class SyntaxTrees
+{
+    // 1. async completely with read all text + parse
+    // 2. one thread reads async, queues up parser
+    // 3. all sync
+
+    static readonly string directory = @"E:\Coding\C#\roslyn\src\Compilers\Core";
+    static readonly CSharpParseOptions ParseOptions = new CSharpParseOptions(LanguageVersion.Latest, 
+        DocumentationMode.None, SourceCodeKind.Regular);
+
+    [Benchmark]
+    public async Task<SyntaxTree[]> all_async()
+    { 
+        var files = Directory.GetFiles(directory, "*.cs", SearchOption.AllDirectories);
+        var count = files.Length;
+        var syntaxTreeArrays = new SyntaxTree[count];
+        var syntaxTreeTasks = new Task<SyntaxTree>[count];
+        
+        for (int i = 0; i < count; i++)
+        {
+            syntaxTreeTasks[i] = LoadSyntaxTree(files[i]);
+
+            static async Task<SyntaxTree> LoadSyntaxTree(string filePath)
+            {
+                var t = await File.ReadAllTextAsync(filePath);
+                var tree = CSharpSyntaxTree.ParseText(t, ParseOptions, filePath);
+                await tree.GetRootAsync();
+                return tree;
+            }
+
+        }
+        for (int j = 0; j < count; j++)
+        {
+            syntaxTreeArrays[j] = await syntaxTreeTasks[j];
+        }
+
+        return syntaxTreeArrays;
+    }
+
+    [Benchmark]
+    public List<SyntaxNode> all_sync()
+    { 
+        var files = Directory.GetFiles(directory, "*.cs", SearchOption.AllDirectories);
+        var syntaxTrees = new List<SyntaxNode>();
+        
+        foreach (var f in files)
+        {
+            var t = File.ReadAllText(f);
+            var tree = CSharpSyntaxTree.ParseText(t, ParseOptions, f);
+            syntaxTrees.Add(tree.GetRoot());
+        }
+        return syntaxTrees;
+    }
+
+    [Benchmark]
+    public async Task<List<SyntaxNode>> one_thread_reads_parsing_done_async_a()
+    { 
+        var files = Directory.GetFiles(directory, "*.cs", SearchOption.AllDirectories);
+        var syntaxTrees = new List<Task<SyntaxNode>>();
+        
+        foreach (var f in files)
+        {
+            var t = await File.ReadAllTextAsync(f);
+            var tree = CSharpSyntaxTree.ParseText(t, ParseOptions, f);
+            syntaxTrees.Add(tree.GetRootAsync());
+        }
+
+        List<SyntaxNode> nodes = new List<SyntaxNode>();
+        foreach (var t in syntaxTrees)
+            nodes.Add(await t);
+
+        return nodes;
+    }
+
+    [Benchmark]
+    public async Task<List<SyntaxNode>> one_thread_reads_parsing_done_async_b()
+    { 
+        var files = Directory.GetFiles(directory, "*.cs", SearchOption.AllDirectories);
+        List<SyntaxNode> nodes = new List<SyntaxNode>();
+        
+        foreach (var f in files)
+        {
+            var t = await File.ReadAllTextAsync(f);
+            var tree = CSharpSyntaxTree.ParseText(t, ParseOptions, f);
+            nodes.Add(tree.GetRoot());
+        }
+
+        return nodes;
+    }
+
+    [Benchmark]
+    public async Task<List<SyntaxNode>> one_thread_reads_parsing_done_async_c()
+    { 
+        var files = Directory.GetFiles(directory, "*.cs", SearchOption.AllDirectories);
+        var syntaxTrees = new List<Task<SyntaxNode>>();
+        
+        foreach (var f in files)
+        {
+            var t = await File.ReadAllTextAsync(f);
+            syntaxTrees.Add(read());
+
+            async Task<SyntaxNode> read()
+            {
+                var tree = CSharpSyntaxTree.ParseText(t, ParseOptions, f);
+                return await tree.GetRootAsync();
+            }
+        }
+
+        List<SyntaxNode> nodes = new List<SyntaxNode>();
+        foreach (var t in syntaxTrees)
+            nodes.Add(await t);
+
+        return nodes;
+    }
+
+    [Benchmark]
+    public async Task<ConcurrentBag<SyntaxNode>> one_thread_reads_parsing_done_async_d()
+    { 
+        var files = Directory.GetFiles(directory, "*.cs", SearchOption.AllDirectories);
+        var syntaxTrees = new ConcurrentBag<SyntaxNode>();
+        var tasks = new List<Task>();
+        
+        foreach (var f in files)
+        {
+            var t = await File.ReadAllTextAsync(f);
+            tasks.Add(read());
+
+            async Task read()
+            {
+                var tree = CSharpSyntaxTree.ParseText(t, ParseOptions, f);
+                var root = await tree.GetRootAsync();
+                syntaxTrees.Add(root);
+            }
+        }
+
+        await Task.WhenAll(tasks);
+
+        return syntaxTrees;
     }
 }
