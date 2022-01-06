@@ -9,6 +9,9 @@ using System.IO;
 using System.Threading.Tasks;
 using BenchmarkDotNet.Order;
 using System.Diagnostics.CodeAnalysis;
+using System.Buffers;
+using Microsoft.Win32.SafeHandles;
+using System.Reflection;
 
 [SimpleJob(10, 5, 50, 15)]
 public class Program
@@ -207,7 +210,8 @@ public class Program
         // var summary = BenchmarkRunner.Run<MyListVsList>();
         // var summary = BenchmarkRunner.Run<Foreaches>();
         // var summary = BenchmarkRunner.Run<AsyncVsSyncFiles>();
-        var summary = BenchmarkRunner.Run<EnumerateFilesVsGetFiles1>();
+        // var summary = BenchmarkRunner.Run<EnumerateFilesVsGetFiles1>();
+        var summary = BenchmarkRunner.Run<Files7>();
     }
 }
 
@@ -785,6 +789,7 @@ public interface IShouldIgnoreDirectory
         Debug.Assert(ignore != null, "Check yourself before calling");
         Debug.Assert(fileSearchPattern != null, "Invalid pattern");
 
+        // RESULT: twice as slow as filtering EnumerateFiles
         Stack<string> directories = new Stack<string>();
         directories.Push(rootDirectory);
         while (directories.Count > 0)
@@ -800,3 +805,295 @@ public interface IShouldIgnoreDirectory
     }
 }
 
+
+[HtmlExporter]
+[MemoryDiagnoser]
+[MinIterationCount(5)]
+[MaxIterationCount(15)]
+[MinWarmupCount(1)]
+[MaxWarmupCount(10)]
+public class Files7
+{
+    const int kb = 1024;
+    const int mb = kb * kb;
+    
+    
+    [Params(
+        //kb, 
+        // 128 * kb
+        1 * kb,
+        2 * kb,
+        4 * kb,
+        8 * kb,
+        16 * kb,
+        64 * kb
+    // 16 * kb, 64 * kb
+    // , mb
+    )]
+    public int numBytesPerChunk;
+    
+    
+    [Params(
+        // 1, 2
+        // , 
+        10
+        // , 10
+    )]
+    public int numChunks;
+
+
+    [Params(
+        // 1, 5, 
+        // 20 
+        //, 25
+        10
+        // , 50
+    )]
+    public int numFilesAtOnce;
+    
+    
+    public byte[][] bytes;
+
+
+    [GlobalSetup]
+    public void GlobalSetup()
+    {
+        bytes = new byte[numChunks][]; // executed once per each N value
+        for (int i = 0; i < numChunks; i++)
+            bytes[i] = new byte[numBytesPerChunk];
+        _toClear.Clear();
+    }
+
+    public List<string> _toClear = new List<string>(); 
+
+
+    [GlobalCleanup]
+    public void GlobalCleanup()
+    {
+        foreach (var d in _toClear)
+        {
+            foreach (var f in Directory.EnumerateFiles(d))
+                File.Delete(f);
+            Directory.Delete(d);
+        }
+    }
+
+    public string MakeTempDir()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + "_sync");
+        _toClear.Add(dir);
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+
+    // [Benchmark]
+    public void write_files_sync()
+    {
+        var arr = ArrayPool<byte>.Shared.Rent(numChunks * numBytesPerChunk);
+        string dir = MakeTempDir();
+        for (int fileIndex = 0; fileIndex < numFilesAtOnce; fileIndex++)
+        {
+            for (int chunkIndex = 0; chunkIndex < numChunks; chunkIndex++)
+            {
+                Buffer.BlockCopy(bytes[chunkIndex], 0, arr, chunkIndex * numBytesPerChunk, numBytesPerChunk); 
+            }
+            File.WriteAllBytes(Path.Join(dir, fileIndex.ToString() + ".txt"), arr); 
+        }
+        ArrayPool<byte>.Shared.Return(arr);
+    }
+
+    public Task WriteFilesAsync(bool queueWithTaskRun)
+    {
+        Task[] result = new Task[numFilesAtOnce];
+        string dir = MakeTempDir();
+        for (int i = 0; i < result.Length; i++)
+        {
+            var path = Path.Join(dir, i.ToString() + ".txt");
+            if (queueWithTaskRun)
+                result[i] = Task.Run(delegate { WriteFileAsync(path, bytes).Wait(); }); 
+            else
+                result[i] = WriteFileAsync(path, bytes);
+        }
+        return Task.WhenAll(result);
+
+        static async Task WriteFileAsync(string path, byte[][] bytes)
+        {
+            int length = bytes.Sum(b => b.Length);
+            var arr = ArrayPool<byte>.Shared.Rent(length);
+
+            int offset = 0;
+            for (int chunkIndex = 0; chunkIndex < bytes.Length; chunkIndex++)
+            {
+                Buffer.BlockCopy(bytes[chunkIndex], 0, arr, offset, bytes[chunkIndex].Length); 
+                offset += bytes[chunkIndex].Length;
+            }
+
+            await File.WriteAllBytesAsync(path, arr); 
+            ArrayPool<byte>.Shared.Return(arr);
+        }
+    }
+
+    // [Benchmark]
+    public Task write_files_async1()
+    {
+        return WriteFilesAsync(false);
+    }
+
+    // [Benchmark]
+    public Task write_files_async2()
+    {
+        return WriteFilesAsync(true);
+    }
+
+    public static class ReflectedFileStreamHelpers
+    {
+        // The method I need is internal.
+        // System.IO.Strategies.FileStreamHelpers.SetFileLength(SafeFileHandle, long);
+        public static readonly Action<SafeFileHandle, long> SetFileLength;
+
+        static ReflectedFileStreamHelpers()
+        {
+            SetFileLength = typeof(FileStream).Assembly
+                .GetType("System.IO.Strategies.FileStreamHelpers")
+                .GetMethod("SetFileLength", BindingFlags.Static|BindingFlags.NonPublic)
+                .CreateDelegate<Action<SafeFileHandle, long>>();
+        }
+    }
+
+    // [Benchmark]
+    public Task write_files_async_without_buffer_copies_safe_handle()
+    {
+        Task[] result = new Task[numFilesAtOnce];
+        string dir = MakeTempDir();
+        for (int i = 0; i < result.Length; i++)
+        {
+            var path = Path.Join(dir, i.ToString() + ".txt");
+            result[i] = WriteFileAsync(path, bytes);
+        }
+        return Task.WhenAll(result);
+
+        static async Task WriteFileAsync(string path, byte[][] bytes)
+        {
+            using SafeFileHandle handle = File.OpenHandle(path, FileMode.CreateNew, FileAccess.Write);
+
+            int offset = 0;
+            for (int chunkIndex = 0; chunkIndex < bytes.Length; chunkIndex++)
+            {
+                await RandomAccess.WriteAsync(handle, bytes[chunkIndex], offset);
+                offset += bytes[chunkIndex].Length;
+            }
+        }
+    }
+
+    [Benchmark]
+    public async Task write_files_almost_sync_without_buffer_copies_safe_handle()
+    {
+        string dir = MakeTempDir();
+        for (int i = 0; i < numFilesAtOnce; i++)
+        {
+            var path = Path.Join(dir, i.ToString() + ".txt");
+            await WriteFileAsync(path, bytes);
+        }
+
+        static async Task WriteFileAsync(string path, byte[][] bytes)
+        {
+            using SafeFileHandle handle = File.OpenHandle(path, FileMode.CreateNew, FileAccess.Write);
+
+            int offset = 0;
+            for (int chunkIndex = 0; chunkIndex < bytes.Length; chunkIndex++)
+            {
+                await RandomAccess.WriteAsync(handle, bytes[chunkIndex], offset);
+                offset += bytes[chunkIndex].Length;
+            }
+        }
+    }
+
+    [Benchmark]
+    public async Task write_files_almost_sync_file_stream()
+    {
+        string dir = MakeTempDir();
+        for (int i = 0; i < numFilesAtOnce; i++)
+        {
+            var path = Path.Join(dir, i.ToString() + ".txt");
+            await WriteFileAsync(path, bytes);
+        }
+
+        static async Task WriteFileAsync(string path, byte[][] bytes)
+        {
+            using SafeFileHandle handle = File.OpenHandle(path, FileMode.CreateNew, FileAccess.Write);
+            using FileStream fileStream = new FileStream(handle, FileAccess.Write);
+
+            for (int chunkIndex = 0; chunkIndex < bytes.Length; chunkIndex++)
+                await fileStream.WriteAsync(bytes[chunkIndex]);
+        }
+    }
+
+    
+    [Benchmark]
+    public void write_files_sync_file_stream()
+    {
+        string dir = MakeTempDir();
+        for (int i = 0; i < numFilesAtOnce; i++)
+        {
+            var path = Path.Join(dir, i.ToString() + ".txt");
+            using SafeFileHandle handle = File.OpenHandle(path, FileMode.CreateNew, FileAccess.Write);
+            using FileStream fileStream = new FileStream(handle, FileAccess.Write);
+
+            for (int chunkIndex = 0; chunkIndex < bytes.Length; chunkIndex++)
+                fileStream.Write(bytes[chunkIndex]);
+        }
+    }
+
+
+    [Benchmark]
+    public void write_files_sync_without_buffer_copies_safe_handle()
+    {
+        string dir = MakeTempDir();
+        for (int i = 0; i < numFilesAtOnce; i++)
+        {
+            var path = Path.Join(dir, i.ToString() + ".txt");
+            using SafeFileHandle handle = File.OpenHandle(path, FileMode.CreateNew, FileAccess.Write);
+
+            int offset = 0;
+            for (int chunkIndex = 0; chunkIndex < bytes.Length; chunkIndex++)
+            {
+                RandomAccess.Write(handle, bytes[chunkIndex], offset);
+                offset += bytes[chunkIndex].Length;
+            }
+        }
+    }
+
+
+    // [Benchmark]
+    public Task write_files_async_with_buffering_all_safe_handle()
+    {
+        Task[] result = new Task[numFilesAtOnce];
+        string dir = MakeTempDir();
+        for (int i = 0; i < result.Length; i++)
+        {
+            var path = Path.Join(dir, i.ToString() + ".txt");
+            result[i] = WriteFileAsync(path, bytes);
+        }
+        return Task.WhenAll(result);
+
+        static async Task WriteFileAsync(string path, byte[][] bytes)
+        {
+
+            int length = bytes.Sum(b => b.Length);
+            var arr = ArrayPool<byte>.Shared.Rent(length);
+
+            int offset = 0;
+            for (int chunkIndex = 0; chunkIndex < bytes.Length; chunkIndex++)
+            {
+                Buffer.BlockCopy(bytes[chunkIndex], 0, arr, offset, bytes[chunkIndex].Length); 
+                offset += bytes[chunkIndex].Length;
+            }
+
+            using SafeFileHandle handle = File.OpenHandle(path, FileMode.CreateNew, FileAccess.Write);
+            await RandomAccess.WriteAsync(handle, arr, offset);
+            
+            ArrayPool<byte>.Shared.Return(arr);
+        }
+    }
+}
